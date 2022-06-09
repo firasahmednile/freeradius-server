@@ -1,0 +1,6 @@
+VENDOR	Nile	58313
+BEGIN-VENDOR	Nile
+ATTRIBUTE		redirect-url	1	string	
+ATTRIBUTE		netseg	        2	string	
+ATTRIBUTE		nile-avpair	    3	string
+END-VENDOR		Nile
