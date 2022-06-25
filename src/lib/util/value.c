@@ -52,6 +52,7 @@ RCSID("$Id$")
 #include <freeradius-devel/util/atexit.h>
 #include <freeradius-devel/util/base16.h>
 #include <freeradius-devel/util/dcursor.h>
+#include <freeradius-devel/util/size.h>
 #include <freeradius-devel/util/time.h>
 
 #include <math.h>
@@ -615,10 +616,8 @@ static inline void fr_value_box_copy_meta(fr_value_box_t *dst, fr_value_box_t co
  *	- 1 if a is more than b.
  *	- < -1 on failure.
  */
-int fr_value_box_cmp(fr_value_box_t const *a, fr_value_box_t const *b)
+int8_t fr_value_box_cmp(fr_value_box_t const *a, fr_value_box_t const *b)
 {
-	int compare = 0;
-
 	if (!fr_cond_assert(a->type != FR_TYPE_NULL)) return -1;
 	if (!fr_cond_assert(b->type != FR_TYPE_NULL)) return -1;
 
@@ -643,8 +642,8 @@ int fr_value_box_cmp(fr_value_box_t const *a, fr_value_box_t const *b)
 		}
 
 		if (length) {
-			compare = memcmp(a->vb_octets, b->vb_octets, length);
-			if (compare != 0) break;
+			int cmp = memcmp(a->datum.ptr, b->datum.ptr, length);
+			if (cmp != 0) return CMP(cmp, 0);
 		}
 
 		/*
@@ -653,90 +652,70 @@ int fr_value_box_cmp(fr_value_box_t const *a, fr_value_box_t const *b)
 		 *
 		 *	i.e. "0x00" is smaller than "0x0000"
 		 */
-		compare = a->vb_length - b->vb_length;
+		return CMP(a->vb_length, b->vb_length);
 	}
-		break;
 
-		/*
-		 *	Short-hand for simplicity.
-		 */
-#define CHECK(_type) do { \
-			if (a->datum._type < b->datum._type)   { compare = -1; \
-			} else if (a->datum._type > b->datum._type) { compare = +1; } \
-		     } while (0)
+	/*
+	 *	Short-hand for simplicity.
+	 */
+#define RETURN(_type) return CMP(a->datum._type, b->datum._type)
+#define COMPARE(_type) return CMP(memcmp(&a->datum._type, &b->datum._type, sizeof(a->datum._type)), 0);
 
 	case FR_TYPE_BOOL:
-		CHECK(boolean);
-		break;
+		RETURN(boolean);
 
 	case FR_TYPE_DATE:
-		compare = fr_unix_time_cmp(a->datum.date, b->datum.date);
-		break;
+		return fr_unix_time_cmp(a->datum.date, b->datum.date);
 
 	case FR_TYPE_UINT8:
-		CHECK(uint8);
-		break;
+		RETURN(uint8);
 
 	case FR_TYPE_UINT16:
-		CHECK(uint16);
-		break;
+		RETURN(uint16);
 
 	case FR_TYPE_UINT32:
-		CHECK(uint32);
-		break;
+		RETURN(uint32);
 
 	case FR_TYPE_UINT64:
-		CHECK(uint64);
-		break;
+		RETURN(uint64);
 
 	case FR_TYPE_INT8:
-		CHECK(int8);
-		break;
+		RETURN(int8);
 
 	case FR_TYPE_INT16:
-		CHECK(int16);
-		break;
+		RETURN(int16);
 
 	case FR_TYPE_INT32:
-		CHECK(int32);
-		break;
+		RETURN(int32);
 
 	case FR_TYPE_INT64:
-		CHECK(int64);
-		break;
+		RETURN(int64);
 
 	case FR_TYPE_SIZE:
-		CHECK(size);
-		break;
+		RETURN(size);
 
 	case FR_TYPE_TIME_DELTA:
-		compare = fr_time_delta_cmp(a->datum.time_delta, b->datum.time_delta);
-		break;
+		return fr_time_delta_cmp(a->datum.time_delta, b->datum.time_delta);
 
 	case FR_TYPE_FLOAT32:
-		CHECK(float32);
-		break;
+		RETURN(float32);
 
 	case FR_TYPE_FLOAT64:
-		CHECK(float64);
-		break;
+		RETURN(float64);
 
 	case FR_TYPE_ETHERNET:
-		compare = memcmp(a->vb_ether, b->vb_ether, sizeof(a->vb_ether));
-		break;
+		COMPARE(ether);
 
+	case FR_TYPE_COMBO_IP_ADDR:
+	case FR_TYPE_COMBO_IP_PREFIX:
 	case FR_TYPE_IPV4_ADDR:
 	case FR_TYPE_IPV4_PREFIX:
 	case FR_TYPE_IPV6_ADDR:
 	case FR_TYPE_IPV6_PREFIX:
-	case FR_TYPE_COMBO_IP_ADDR:
-	case FR_TYPE_COMBO_IP_PREFIX:
-		compare = memcmp(&a->vb_ip, &b->vb_ip, sizeof(a->vb_ip));
-		break;
+		return fr_ipaddr_cmp(&a->vb_ip, &b->vb_ip);
 
 	case FR_TYPE_IFID:
-		compare = memcmp(a->vb_ifid, b->vb_ifid, sizeof(a->vb_ifid));
-		break;
+		COMPARE(ifid);
 
 	/*
 	 *	These should be handled at some point
@@ -750,9 +729,6 @@ int fr_value_box_cmp(fr_value_box_t const *a, fr_value_box_t const *b)
 	 *	static analysis will warn us they're not handled
 	 */
 	}
-
-	if (compare > 0) return 1;
-	if (compare < 0) return -1;
 	return 0;
 }
 
@@ -4833,6 +4809,10 @@ parse:
 	case FR_TYPE_FLOAT64:
 		return fr_value_box_from_numeric_substr(dst, dst_type, dst_enumv, in, rules, tainted);
 
+	case FR_TYPE_SIZE:
+		if (fr_size_from_str(&dst->datum.size, &our_in) < 0) return -1;
+		goto finish;
+
 	case FR_TYPE_BOOL:
 		fr_value_box_init(dst, dst_type, dst_enumv, tainted);
 
@@ -4985,10 +4965,6 @@ parse:
 	buffer[fr_sbuff_remaining(in)] = '\0';
 
 	switch (dst_type) {
-	case FR_TYPE_SIZE:
-		if (fr_size_from_str(&dst->datum.size, buffer) < 0) return -1;
-		break;
-
 	case FR_TYPE_DATE:
 	{
 		if (dst_enumv) {
@@ -5342,10 +5318,14 @@ ssize_t fr_value_box_list_concat_as_string(bool *tainted, fr_sbuff_t *sbuff, fr_
 			break;
 
 		case FR_TYPE_OCTETS:
+			if (vb->tainted && e_rules) goto cast;
+
 			slen = fr_sbuff_in_bstrncpy(&our_sbuff, (char const *)vb->vb_strvalue, vb->vb_length);
 			break;
 
 		case FR_TYPE_STRING:
+			if (vb->tainted && e_rules) goto cast;
+
 			slen = fr_sbuff_in_bstrncpy(&our_sbuff, vb->vb_strvalue, vb->vb_length);
 			break;
 

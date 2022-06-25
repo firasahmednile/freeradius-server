@@ -192,7 +192,7 @@ static ssize_t encode_tunnel_password(fr_dbuff_t *dbuff, fr_dbuff_marker_t *in, 
 	/*
 	 *	Copy the password over, and fill the remainder with random data.
 	 */
-	fr_dbuff_out_memcpy(tpasswd + 3, in, inlen);
+	(void) fr_dbuff_out_memcpy(tpasswd + 3, in, inlen);
 
 	for (i = 3 + inlen; i < sizeof(tpasswd); i++) {
 		tpasswd[i] = fr_fast_rand(&packet_ctx->rand_ctx);
@@ -612,7 +612,7 @@ static ssize_t encode_value(fr_dbuff_t *dbuff,
 		 *	Only 24bit integers are allowed here
 		 */
 		fr_dbuff_set(&src,  &value_start);
-		fr_dbuff_out(&msb, &src);
+		(void) fr_dbuff_out(&msb, &src);
 		if (msb != 0) {
 			fr_strerror_const("Integer overflow for tagged uint32 attribute");
 			return PAIR_ENCODE_SKIPPED;
@@ -1245,6 +1245,9 @@ static ssize_t encode_nas_filter_rule(fr_dbuff_t *dbuff,
 
 	FR_PROTO_STACK_PRINT(da_stack, depth);
 
+	fr_assert(vp);
+	fr_assert(vp->da);
+
 	fr_dbuff_marker(&hdr, &work_dbuff);
 	fr_dbuff_marker(&frag_hdr, &work_dbuff);
 	fr_dbuff_advance(&hdr, 1);
@@ -1252,7 +1255,7 @@ static ssize_t encode_nas_filter_rule(fr_dbuff_t *dbuff,
 
 	fr_assert(vp->da == attr_nas_filter_rule);
 
-	while (vp) {
+	while (true) {
 		size_t data_len = vp->vp_length;
 		size_t frag_len;
 		char const *p = vp->vp_strvalue;

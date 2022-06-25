@@ -38,11 +38,6 @@ extern "C" {
 #include <string.h>
 #include <sys/types.h>
 
-#include <freeradius-devel/util/atexit.h>
-#include <freeradius-devel/util/strerror.h>
-#include <freeradius-devel/util/table.h>
-#include <freeradius-devel/util/talloc.h>
-
 /** Represents number of bytes parsed or location of parse error
  *
  * Number of bytes parsed will be >= 0.
@@ -56,8 +51,12 @@ extern "C" {
 typedef ssize_t fr_slen_t;
 typedef struct fr_sbuff_s fr_sbuff_t;
 typedef struct fr_sbuff_ptr_s fr_sbuff_marker_t;
-
 typedef size_t(*fr_sbuff_extend_t)(fr_sbuff_t *sbuff, size_t req_extenison);
+
+#include <freeradius-devel/util/atexit.h>
+#include <freeradius-devel/util/strerror.h>
+#include <freeradius-devel/util/table.h>
+#include <freeradius-devel/util/talloc.h>
 
 struct fr_sbuff_ptr_s {
 	union {
@@ -125,6 +124,7 @@ typedef struct {
 	FILE			*file;			//!< FILE * we're reading from.
 	char			*buff_end;		//!< The true end of the buffer.
 	size_t			max;			//!< Maximum number of bytes to read.
+	size_t			shifted;		//!< How much we've read from this file.
 	bool			eof;			//!< are we at EOF?
 } fr_sbuff_uctx_file_t;
 
@@ -138,6 +138,8 @@ typedef struct {
 
 /** Set of terminal elements
  *
+ *  The elements MUST be listed in sorted order.  If the inputs are
+ *  not sorted, then all kinds of things will break.
  */
 typedef struct {
 	size_t			len;			//!< Length of the list.
@@ -173,7 +175,7 @@ typedef struct {
 	char const	*name;				//!< Name for rule set to aid we debugging.
 
 	char		chr;				//!< Character at the start of an escape sequence.
-	char const	subs[UINT8_MAX + 1];		//!< Special characters and their substitutions.
+	char		subs[UINT8_MAX + 1];		//!< Special characters and their substitutions.
 							///< Indexed by the printable representation i.e.
 							///< 'n' for \n.
 	bool		skip[UINT8_MAX + 1];		//!< Characters that are escaped, but left in the
@@ -195,7 +197,7 @@ typedef struct {
 
 	char		chr;				//!< Character at the start of an escape sequence.
 
-	char const	subs[UINT8_MAX + 1];		//!< Special characters and their substitutions.
+	char		subs[UINT8_MAX + 1];		//!< Special characters and their substitutions.
 							///< Indexed by the binary representation i.e.
 							///< 0x0a for \n.
 	bool		esc[UINT8_MAX + 1];		//!< Characters that should be translated to hex or
@@ -266,6 +268,7 @@ extern bool const sbuff_char_class_float[UINT8_MAX + 1];
 extern bool const sbuff_char_class_zero[UINT8_MAX + 1];
 extern bool const sbuff_char_class_hex[UINT8_MAX + 1];
 extern bool const sbuff_char_alpha_num[UINT8_MAX + 1];
+extern bool const sbuff_char_word[UINT8_MAX + 1];
 extern bool const sbuff_char_whitespace[UINT8_MAX + 1];
 extern bool const sbuff_char_line_endings[UINT8_MAX + 1];
 extern bool const sbuff_char_blank[UINT8_MAX + 1];
@@ -404,7 +407,7 @@ do { \
 	.p		= (_current), \
 	.is_const 	= fr_sbuff_ptr(_sbuff_or_marker)->is_const, \
 	.adv_parent 	= (_adv_parent), \
-	.shifted	= fr_sbuff_ptr(_sbuff_or_marker)->shifted, \
+	.shifted	= 0, \
 	.extend		= (_extend), \
 	.uctx		= fr_sbuff_ptr(_sbuff_or_marker)->uctx, \
 	.parent 	= fr_sbuff_ptr(_sbuff_or_marker) \

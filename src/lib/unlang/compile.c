@@ -303,7 +303,7 @@ static bool pass2_fixup_cond_map(fr_cond_t *c, CONF_ITEM *ci, fr_dict_t const *d
 		 *	Now that we have known data types for the LHS
 		 *	/ RHS attribute(s), go check them.
 		 */
-		if (fr_cond_promote_types(c, NULL, NULL, NULL) < 0) {
+		if (fr_cond_promote_types(c, NULL, NULL, NULL, false) < 0) {
 			cf_log_perr(ci, "Failed parsing condition after dynamic attributes were defined");
 			return false;
 		}
@@ -485,7 +485,7 @@ static bool pass2_fixup_cond_map(fr_cond_t *c, CONF_ITEM *ci, fr_dict_t const *d
 	 *	with the request pairs.
 	 */
 	if (!tmpl_is_attr(map->lhs) ||
-	    (tmpl_request(map->lhs) != REQUEST_CURRENT) ||
+	    !tmpl_request_ref_is_current(tmpl_request(map->lhs)) ||
 	    (tmpl_list(map->lhs) != PAIR_LIST_REQUEST)) {
 		return true;
 	}
@@ -2301,7 +2301,7 @@ static unlang_t *compile_children(unlang_group_t *g, unlang_compile_t *unlang_ct
 		case UNLANG_TYPE_IF:
 			was_if = true;
 			{
-				unlang_group_t		*f;
+				unlang_group_t	*f;
 				unlang_cond_t	*gext;
 
 				f = unlang_generic_to_group(single);
@@ -3038,6 +3038,10 @@ static unlang_t *compile_if_subsection(unlang_t *parent, unlang_compile_t *unlan
 	unlang_cond_t		*gext;
 
 	fr_cond_t		*cond;
+#ifdef WITH_XLAT_COND
+	xlat_exp_head_t		*head;
+	bool			is_truthy, value;
+#endif
 
 	if (!cf_section_name2(cs)) {
 		cf_log_err(cs, "'%s' without condition", unlang_ops[ext->type].name);
@@ -3047,10 +3051,30 @@ static unlang_t *compile_if_subsection(unlang_t *parent, unlang_compile_t *unlan
 	cond = cf_data_value(cf_data_find(cs, fr_cond_t, NULL));
 	fr_assert(cond != NULL);
 
+#ifdef WITH_XLAT_COND
+	head = cf_data_value(cf_data_find(cs, xlat_exp_head_t, NULL));
+	fr_assert(head != NULL);
+
+	/*
+	 *	Resolve the xlat first.
+	 */
+	if (xlat_resolve(head, NULL) < 0) {
+		cf_log_err(cs, "Failed resolving condition - %s", fr_strerror());
+		return NULL;
+	}
+
+	is_truthy = xlat_is_truthy(head, &value);
+#endif
+
 	if (cond->type == COND_TYPE_FALSE) {
 		cf_log_debug_prefix(cs, "Skipping contents of '%s' as it is always 'false'",
 				    unlang_ops[ext->type].name);
+
+		c = compile_section(parent, unlang_ctx, cs, ext);
+		talloc_free(c);
+
 		c = compile_empty(parent, unlang_ctx, cs, ext);
+
 	} else {
 		fr_cond_iter_t	iter;
 		fr_cond_t	*leaf;
@@ -3082,6 +3106,7 @@ static unlang_t *compile_if_subsection(unlang_t *parent, unlang_compile_t *unlan
 		}
 
 		fr_cond_async_update(cond);
+
 		c = compile_section(parent, unlang_ctx, cs, ext);
 	}
 	if (!c) return NULL;
@@ -3090,6 +3115,12 @@ static unlang_t *compile_if_subsection(unlang_t *parent, unlang_compile_t *unlan
 	g = unlang_generic_to_group(c);
 	gext = unlang_group_to_cond(g);
 	gext->cond = cond;
+
+#ifdef WITH_XLAT_COND
+	gext->head = head;
+	gext->is_truthy = is_truthy;
+	gext->value = value;
+#endif
 
 	return c;
 }

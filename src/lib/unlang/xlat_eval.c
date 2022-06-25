@@ -61,6 +61,7 @@ static fr_dict_attr_t const *attr_packet_authentication_vector;
 static fr_dict_attr_t const *attr_packet_type;
 fr_dict_attr_t const	    *attr_expr_bool_enum; /* xlat_expr.c */
 fr_dict_attr_t const		*attr_module_return_code; /* xlat_expr.c */
+fr_dict_attr_t const		*attr_cast_base; /* xlat_expr.c */
 
 static fr_dict_attr_autoload_t xlat_eval_dict_attr[] = {
 	{ .out = &attr_client_ip_address, .name = "Client-IP-Address", .type = FR_TYPE_IPV4_ADDR, .dict = &dict_freeradius },
@@ -78,6 +79,7 @@ static fr_dict_attr_autoload_t xlat_eval_dict_attr[] = {
 	{ .out = &attr_packet_authentication_vector, .name = "Packet-Authentication-Vector", .type = FR_TYPE_OCTETS, .dict = &dict_radius },
 	{ .out = &attr_packet_type, .name = "Packet-Type", .type = FR_TYPE_UINT32, .dict = &dict_radius },
 	{ .out = &attr_expr_bool_enum, .name = "Expr-Bool-Enum", .type = FR_TYPE_BOOL, .dict = &dict_freeradius },
+	{ .out = &attr_cast_base, .name = "Cast-Base", .type = FR_TYPE_UINT8, .dict = &dict_freeradius },
 	{ NULL }
 };
 
@@ -902,7 +904,6 @@ xlat_eval_pair_real(TALLOC_CTX *ctx, fr_value_box_list_t *out, request_t *reques
 		goto done;
 	}
 
-
 	switch (tmpl_num(vpt)) {
 	/*
 	 *	Return a count of the VPs.
@@ -949,6 +950,7 @@ xlat_eval_pair_real(TALLOC_CTX *ctx, fr_value_box_list_t *out, request_t *reques
 		value = fr_value_box_alloc(ctx, vp->data.type, vp->da, vp->data.tainted);
 		if (!value) goto oom;
 
+		fr_assert(fr_type_is_leaf(vp->da->type));
 		fr_value_box_copy(value, value, &vp->data);	/* Also dups taint */
 		fr_dlist_insert_tail(out, value);
 		break;
@@ -1333,8 +1335,13 @@ xlat_action_t xlat_frame_eval(TALLOC_CTX *ctx, fr_dcursor_t *out, xlat_exp_head_
 				fr_dlist_insert_tail(&result, value);
 
 			} else if (tmpl_is_attr(node->vpt) ||  tmpl_is_list(node->vpt)) {
-				XLAT_DEBUG("** [%i] %s(attribute) - %%{%s}", unlang_interpret_stack_depth(request), __FUNCTION__,
-					   node->fmt);
+				if (node->fmt[0] == '&') {
+					XLAT_DEBUG("** [%i] %s(attribute) - %s", unlang_interpret_stack_depth(request), __FUNCTION__,
+						   node->fmt);
+				} else {
+					XLAT_DEBUG("** [%i] %s(attribute) - %%{%s}", unlang_interpret_stack_depth(request), __FUNCTION__,
+						   node->fmt);
+				}
 				xlat_debug_log_expansion(request, node, NULL);
 
 				if (xlat_eval_pair_real(ctx, &result, request, node->vpt) == XLAT_ACTION_FAIL) goto fail;
@@ -1369,6 +1376,61 @@ xlat_action_t xlat_frame_eval(TALLOC_CTX *ctx, fr_dcursor_t *out, xlat_exp_head_
 				 *	code to deal with this case.
 				 */
 				fr_assert(0);
+			}
+
+			/*
+			 *	Apply a cast to the results if required.
+			 */
+			if (tmpl_rules_cast(node->vpt) != FR_TYPE_NULL) {
+				fr_type_t cast = tmpl_rules_cast(node->vpt);
+				fr_value_box_t *vb;
+				bool tainted;
+
+				vb = fr_dlist_head(&result);
+
+				switch (cast) {
+				case FR_TYPE_STRING:
+				case FR_TYPE_OCTETS:
+					if (fr_value_box_list_concat_in_place(vb, vb, &result, cast,
+									      FR_VALUE_BOX_LIST_FREE_BOX, true, SIZE_MAX) < 0) {
+						goto fail;
+					}
+					break;
+
+				default:
+					/*
+					 *	One box, we cast it as the destination type.
+					 *
+					 *	Many boxes, turn them into strings, and try to parse it as the
+					 *	output type.
+					 */
+					if (!fr_dlist_next(&result, vb)) {
+						if (fr_value_box_cast_in_place(vb, vb, cast, NULL) < 0) goto fail;
+
+					} else {
+						ssize_t slen, vlen;
+						fr_sbuff_t *agg;
+
+						FR_SBUFF_TALLOC_THREAD_LOCAL(&agg, 256, 256);
+
+						slen = fr_value_box_list_concat_as_string(&tainted, agg, &result, NULL, 0, NULL,
+											  FR_VALUE_BOX_LIST_FREE_BOX, true);
+						if (slen < 0) goto fail;
+
+						MEM(vb = fr_value_box_alloc_null(ctx));
+						vlen = fr_value_box_from_str(vb, vb, cast, NULL,
+									     fr_sbuff_start(agg), fr_sbuff_used(agg),
+									     NULL, tainted);
+						if ((vlen < 0) || (slen != vlen)) goto fail;
+
+						fr_dlist_insert_tail(&result, vb);
+					}
+					break;
+
+				case FR_TYPE_STRUCTURAL:
+					fr_assert(0);
+					goto fail;
+				}
 			}
 
 			xlat_debug_log_list_result(request, &result);
@@ -1809,22 +1871,17 @@ int xlat_eval_walk(xlat_exp_head_t *head, xlat_walker_t walker, xlat_type_t type
 			if (!type || (type & XLAT_FUNC)) {
 				ret = walker(node, uctx);
 				if (ret < 0) return ret;
-				if (ret > 0) return 0;
 			}
 			break;
 
 		case XLAT_FUNC_UNRESOLVED:
-			if (!type || (type & XLAT_FUNC_UNRESOLVED)) {
-				ret = walker(node, uctx);
-				if (ret < 0) return ret;
-				if (ret > 0) return 0;
-			}
-
-			/*
-			 *	Now evaluate the function's arguments
-			 */
 			if (xlat_exp_head(node->call.args)) {
 				ret = xlat_eval_walk(node->call.args, walker, type, uctx);
+				if (ret < 0) return ret;
+			}
+
+			if (!type || (type & XLAT_FUNC_UNRESOLVED)) {
+				ret = walker(node, uctx);
 				if (ret < 0) return ret;
 			}
 			break;
@@ -1833,7 +1890,7 @@ int xlat_eval_walk(xlat_exp_head_t *head, xlat_walker_t walker, xlat_type_t type
 			if (!type || (type & XLAT_ALTERNATE)) {
 				ret = walker(node, uctx);
 				if (ret < 0) return ret;
-				if (ret > 0) return 0;
+				if (ret > 0) continue;
 			}
 
 			/*
@@ -1853,7 +1910,7 @@ int xlat_eval_walk(xlat_exp_head_t *head, xlat_walker_t walker, xlat_type_t type
 			if (!type || (type & XLAT_GROUP)) {
 				ret = walker(node, uctx);
 				if (ret < 0) return ret;
-				if (ret > 0) return 0;
+				if (ret > 0) continue;
 			}
 
 			/*
@@ -1867,8 +1924,8 @@ int xlat_eval_walk(xlat_exp_head_t *head, xlat_walker_t walker, xlat_type_t type
 			if (!type || (type & node->type)) {
 				ret = walker(node, uctx);
 				if (ret < 0) return ret;
-				if (ret > 0) return 0;
 			}
+			break;
 		}
 	}
 

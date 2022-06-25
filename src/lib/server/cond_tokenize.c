@@ -211,7 +211,7 @@ static int cond_cast_tmpl(tmpl_t *vpt, fr_type_t type, tmpl_t *other)
 /** Promote the types in a FOO OP BAR comparison.
  *
  */
-int fr_cond_promote_types(fr_cond_t *c, fr_sbuff_t *in, fr_sbuff_marker_t *m_lhs, fr_sbuff_marker_t *m_rhs)
+int fr_cond_promote_types(fr_cond_t *c, fr_sbuff_t *in, fr_sbuff_marker_t *m_lhs, fr_sbuff_marker_t *m_rhs, bool simple_parse)
 {
 	fr_type_t lhs_type, rhs_type;
 	fr_type_t cast_type;
@@ -481,6 +481,11 @@ set_types:
 			break;
 		}
 	}
+
+	/*
+	 *	Skip casting.
+	 */
+	if (simple_parse) return 0;
 
 	/*
 	 *	Cast both sides to the promoted type.
@@ -898,12 +903,13 @@ static int cond_forbid_groups(tmpl_t *vpt, fr_sbuff_t *in, fr_sbuff_marker_t *m_
 
 static ssize_t cond_tokenize_operand(fr_cond_t *c, tmpl_t **out,
 				     fr_sbuff_marker_t *opd_start, fr_sbuff_t *in,
-				     tmpl_rules_t const *t_rules)
+				     tmpl_rules_t const *t_rules, bool simple_parse)
 {
 	fr_sbuff_term_t const 		bareword_terminals =
 					FR_SBUFF_TERMS(
-						L("\n"),
+						L(""),			/* Hack for EOF */
 						L("\t"),
+						L("\n"),
 						L(" "),
 						L("!*"),
 						L("!="),
@@ -921,7 +927,6 @@ static ssize_t cond_tokenize_operand(fr_cond_t *c, tmpl_t **out,
 						L(">"),
 						L(">="),
 						L("||"),		/* Logical operator */
-						L("")			/* Hack for EOF */
 					);
 
 	fr_sbuff_t			our_in = FR_SBUFF(in);
@@ -1024,7 +1029,7 @@ static ssize_t cond_tokenize_operand(fr_cond_t *c, tmpl_t **out,
 		 *	the flags.  Try to compile the
 		 *	regex.
 		 */
-		if (tmpl_is_regex_uncompiled(vpt)) {
+		if (!simple_parse && tmpl_is_regex_uncompiled(vpt)) {
 			slen = tmpl_regex_compile(vpt, true);
 			if (slen <= 0) {
 				fr_sbuff_set(&our_in, &m);	/* Reset to start of expression */
@@ -1070,13 +1075,14 @@ static ssize_t cond_tokenize_operand(fr_cond_t *c, tmpl_t **out,
  *  @param[in] in	the start of the string to process.  Should be "(..."
  *  @param[in] brace	look for a closing brace (how many deep we are)
  *  @param[in] t_rules	for attribute parsing
+ *  @param[in] simple_parse	temporary hack
  *  @return
  *	- Length of the string skipped.
  *	- < 0 (the offset to the offending error) on error.
  */
 static ssize_t cond_tokenize(TALLOC_CTX *ctx, fr_cond_t **out,
 			     CONF_SECTION *cs, fr_sbuff_t *in, int brace,
-			     tmpl_rules_t const *t_rules)
+			     tmpl_rules_t const *t_rules, bool simple_parse)
 {
 	fr_sbuff_t		our_in = FR_SBUFF(in);
 	ssize_t			slen;
@@ -1127,7 +1133,7 @@ static ssize_t cond_tokenize(TALLOC_CTX *ctx, fr_cond_t **out,
 		/*
 		 *	Children are allocated from the parent.
 		 */
-		slen = cond_tokenize(c, &c->data.child, cs, &our_in, brace + 1, t_rules);
+		slen = cond_tokenize(c, &c->data.child, cs, &our_in, brace + 1, t_rules, simple_parse);
 		if (slen <= 0) {
 			fr_sbuff_advance(&our_in, slen * -1);
 			goto error;
@@ -1153,7 +1159,7 @@ static ssize_t cond_tokenize(TALLOC_CTX *ctx, fr_cond_t **out,
 	 *	Grab the LHS
 	 */
 	fr_sbuff_marker(&m_lhs_cast, &our_in);
-	slen = cond_tokenize_operand(c, &lhs, &m_lhs, &our_in, t_rules);
+	slen = cond_tokenize_operand(c, &lhs, &m_lhs, &our_in, t_rules, simple_parse);
 	if (!lhs) {
 		fr_sbuff_advance(&our_in, slen * -1);
 		goto error;
@@ -1302,7 +1308,7 @@ static ssize_t cond_tokenize(TALLOC_CTX *ctx, fr_cond_t **out,
 		 *	Grab the RHS
 		 */
 		fr_sbuff_marker(&m_rhs_cast, &our_in);
-		slen = cond_tokenize_operand(c, &rhs, &m_rhs, &our_in, t_rules);
+		slen = cond_tokenize_operand(c, &rhs, &m_rhs, &our_in, t_rules, simple_parse);
 		if (!rhs) {
 			fr_sbuff_advance(&our_in, slen * -1);
 			goto error;
@@ -1351,7 +1357,7 @@ static ssize_t cond_tokenize(TALLOC_CTX *ctx, fr_cond_t **out,
 		 *	Promote the data types to the appropriate
 		 *	values.
 		 */
-		if (fr_cond_promote_types(c, &our_in, &m_lhs, &m_rhs) < 0) {
+		if (fr_cond_promote_types(c, &our_in, &m_lhs, &m_rhs, simple_parse) < 0) {
 			goto error;
 		}
 	} /* parse OP RHS */
@@ -1423,7 +1429,7 @@ closing_brace:
 		 *	siblings are allocated from their older
 		 *	siblings.
 		 */
-		slen = cond_tokenize(child, &child->next, cs, &our_in, brace, t_rules);
+		slen = cond_tokenize(child, &child->next, cs, &our_in, brace, t_rules, simple_parse);
 		if (slen <= 0) {
 			fr_sbuff_advance(&our_in, slen * -1);
 			goto error;
@@ -1439,7 +1445,7 @@ closing_brace:
 	 *	siblings are allocated from their older
 	 *	siblings.
 	 */
-	slen = cond_tokenize(c, &c->next, cs, &our_in, brace, t_rules);
+	slen = cond_tokenize(c, &c->next, cs, &our_in, brace, t_rules, simple_parse);
 	if (slen <= 0) {
 		fr_sbuff_advance(&our_in, slen * -1);
 		goto error;
@@ -1480,26 +1486,19 @@ static void cond_reparent(fr_cond_t *c, fr_cond_t *parent)
  * @param[out] head	the parsed condition structure
  * @param[in] rules	for parsing operands.
  * @param[in] in	the start of the string to process.
+ * @param[in] simple_parse	temporary hack
  * @return
  *	- Length of the string skipped.
  *	- < 0 (the offset to the offending error) on error.
  */
-ssize_t fr_cond_tokenize(CONF_SECTION *cs, fr_cond_t **head, tmpl_rules_t const *rules, fr_sbuff_t *in)
+ssize_t fr_cond_tokenize(CONF_SECTION *cs, fr_cond_t **head, tmpl_rules_t const *rules, fr_sbuff_t *in, bool simple_parse)
 {
-	char buffer[8192];
-	ssize_t diff, slen;
+	ssize_t slen;
+	fr_sbuff_t our_in = FR_SBUFF(in);
 
 	*head = NULL;
 
-	if (!cf_expand_variables(cf_filename(cs), cf_lineno(cs), cf_item_to_section(cf_parent(cs)),
-				 buffer, sizeof(buffer),
-				 fr_sbuff_current(in), fr_sbuff_remaining(in), NULL)) {
-		fr_strerror_const("Failed expanding configuration variable");
-		return 0;
-	}
-
-	diff = fr_sbuff_remaining(in) - strlen(buffer); /* Hack so that we appear to consume more of the string */
-	slen = cond_tokenize(cs, head, cs, &FR_SBUFF_IN(buffer, strlen(buffer)), 0, rules);
+	slen = cond_tokenize(cs, head, cs, &our_in, 0, rules, simple_parse);
 	if (slen <= 0) return slen;
 
 	/*
@@ -1527,7 +1526,7 @@ ssize_t fr_cond_tokenize(CONF_SECTION *cs, fr_cond_t **head, tmpl_rules_t const 
 		cond_reparent(*head, NULL);
 	}
 
-	return slen + diff;
+	return fr_sbuff_set(in, &our_in);
 }
 
 /** Initialise a cond iterator

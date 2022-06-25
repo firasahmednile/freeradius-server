@@ -85,6 +85,10 @@ bool const sbuff_char_class_hostname[UINT8_MAX + 1] = {
 
 bool const sbuff_char_class_hex[UINT8_MAX + 1] = { SBUFF_CHAR_CLASS_HEX };
 bool const sbuff_char_alpha_num[UINT8_MAX + 1] = { SBUFF_CHAR_CLASS_ALPHA_NUM };
+bool const sbuff_char_word[UINT8_MAX + 1] = {
+	SBUFF_CHAR_CLASS_ALPHA_NUM,
+	['-'] = true, ['_'] = true,
+};
 bool const sbuff_char_whitespace[UINT8_MAX + 1] = {
 	['\t'] = true, ['\n'] = true, ['\r'] = true, ['\f'] = true, ['\v'] = true, [' '] = true,
 };
@@ -252,6 +256,7 @@ size_t fr_sbuff_shift(fr_sbuff_t *sbuff, size_t shift)
  */
 size_t fr_sbuff_extend_file(fr_sbuff_t *sbuff, size_t extension)
 {
+	fr_sbuff_t		*sbuff_i;
 	size_t			read, available, total_read;
 	fr_sbuff_uctx_file_t	*fctx;
 
@@ -262,7 +267,7 @@ size_t fr_sbuff_extend_file(fr_sbuff_t *sbuff, size_t extension)
 
 	if (extension == SIZE_MAX) extension = 0;
 
-	total_read = sbuff->shifted + (sbuff->end - sbuff->buff);
+	total_read = fctx->shifted + (sbuff->end - sbuff->buff);
 	if (total_read >= fctx->max) {
 		fr_strerror_const("Can't satisfy extension request, max bytes read");
 		return 0;	/* There's no way we could satisfy the extension request */
@@ -275,7 +280,7 @@ size_t fr_sbuff_extend_file(fr_sbuff_t *sbuff, size_t extension)
 		 *
 		 *	Note: p and markers are constraints here.
 		 */
-		fr_sbuff_shift(sbuff, fr_sbuff_used(sbuff));
+		fctx->shifted += fr_sbuff_shift(sbuff, fr_sbuff_used(sbuff));
 	}
 
 	available = fctx->buff_end - sbuff->end;
@@ -286,7 +291,9 @@ size_t fr_sbuff_extend_file(fr_sbuff_t *sbuff, size_t extension)
 	}
 
 	read = fread(sbuff->end, 1, available, fctx->file);
-	sbuff->end += read;	/* Advance end, which increases fr_sbuff_remaining() */
+	for (sbuff_i = sbuff; sbuff_i; sbuff_i = sbuff_i->parent) {
+		sbuff_i->end += read;	/* Advance end, which increases fr_sbuff_remaining() */
+	}
 
 	/** Check for errors
 	 */
@@ -560,15 +567,12 @@ static inline bool fr_sbuff_terminal_search(fr_sbuff_t *in, char const *p,
 
 /** Compare two terminal elements for ordering purposes
  *
- * @param[in] one      	first terminal to compare.
- * @param[in] two	second terminal to compare.
- * @return CMP(one, two)
+ * @param[in] a      	first terminal to compare.
+ * @param[in] b		second terminal to compare.
+ * @return CMP(a,b)
  */
-static inline int8_t terminal_cmp(void const *one, void const *two)
+static inline int8_t terminal_cmp(fr_sbuff_term_elem_t const *a, fr_sbuff_term_elem_t const *b)
 {
-	fr_sbuff_term_elem_t const	*a = one;
-	fr_sbuff_term_elem_t const	*b = two;
-
 	MEMCMP_RETURN(a, b, str, len);
 	return 0;
 }
@@ -593,73 +597,69 @@ static void fr_sbuff_terminal_debug_tmp(fr_sbuff_term_elem_t const *elem[], size
  */
 fr_sbuff_term_t *fr_sbuff_terminals_amerge(TALLOC_CTX *ctx, fr_sbuff_term_t const *a, fr_sbuff_term_t const *b)
 {
-	size_t				i, j, k;
-	fr_sbuff_term_t			*new;
+	size_t				i, j, num;
+	fr_sbuff_term_t			*out;
 	fr_sbuff_term_elem_t const	*tmp[UINT8_MAX + 1];
-
-	for (i = 0; i < a->len; i++) tmp[i] = &a->elem[i];
-	for (j = 0; j < b->len; i++, j++) tmp[i] = &b->elem[j];
 
 	/*
 	 *	Check all inputs are pre-sorted.  It doesn't break this
 	 *	function, but it's useful in case the terminal arrays
-	 *	are used elsewhere without merging.
+	 *	are defined elsewhere without merging.
 	 */
-#if !defined(NDEBUG) && defined(SBUFF_CHECK_TERM_ORDER)
-	{
-		size_t l;
-
-		if (a->len) {
-			fr_quick_sort((void const **)tmp, 0, a->len - 1, terminal_cmp);
-			for (l = 0; l < a->len; l++) fr_assert(tmp[l] == &a->elem[l]);
-		}
-
-		if (b->len) {
-			fr_quick_sort((void const **)tmp, a->len, b->len - 1, terminal_cmp);
-			for (l = 0; l < b->len; l++) fr_assert(tmp[l + a->len] == &a->elem[l + a->len]);
-		}
-	}
+#if !defined(NDEBUG) && defined(WITH_VERIFY_PTR)
+	for (i = 0; i < a->len - 1; i++) fr_assert(terminal_cmp(&a->elem[i], &a->elem[i + 1]) < 0);
+	for (i = 0; i < b->len - 1; i++) fr_assert(terminal_cmp(&b->elem[i], &b->elem[i + 1]) < 0);
 #endif
 
+	/*
+	 *	Since the inputs are sorted, we can just do an O(n+m)
+	 *	walk through the arrays, comparing entries across the
+	 *	two arrays.
+	 *
+	 *	If there are duplicates, we prefer "a", for no particular reason.
+	 */
+	num = i = j = 0;
+	while ((i < a->len) && (j < b->len)) {
+		int8_t cmp;
 
-	if (likely(i > 1)) {
-		fr_quick_sort((void const **)tmp, 0, i - 1, terminal_cmp);
+		cmp = terminal_cmp(&a->elem[i], &b->elem[j]);
+		if (cmp == 0) {
+			j++;
+			tmp[num++] = &a->elem[i++];
 
-		for (j = 0; j < (i - 1); j++) {
-			/*
-			 *	Duplicate
-			 */
-			if (terminal_cmp(tmp[j], tmp[j + 1]) == 0) {
-				i--;
-				tmp[j] = NULL;
-			}
+		} else if (cmp < 0) {
+			tmp[num++] = &a->elem[i++];
+
+		} else if (cmp > 0) {
+			tmp[num++] = &b->elem[j++];
 		}
+
+		fr_assert(num <= UINT8_MAX);
 	}
 
-	new = talloc_pooled_object(ctx, fr_sbuff_term_t, i, i * sizeof(fr_sbuff_term_elem_t));
-	if (unlikely(!new)) return NULL;
+	/*
+	 *	Only one of these will be hit, and it's simpler than nested "if" statements.
+	 */
+	while (i < a->len) tmp[num++] = &a->elem[i++];
+	while (j < b->len) tmp[num++] = &b->elem[j++];
 
-	new->elem = talloc_array(new, fr_sbuff_term_elem_t, i);
-	if (unlikely(!new->elem)) {
-		talloc_free(new);
+	out = talloc_pooled_object(ctx, fr_sbuff_term_t, num, num * sizeof(fr_sbuff_term_elem_t));
+	if (unlikely(!out)) return NULL;
+
+	out->elem = talloc_array(out, fr_sbuff_term_elem_t, num);
+	if (unlikely(!out->elem)) {
+		talloc_free(out);
 		return NULL;
 	}
+	out->len = num;
 
-	j = 0;	/* Tmp index */
-	k = 0;	/* How many non-nulls we've found */
-	while (k < i) {
-		if (tmp[j] == NULL) {
-			j++;
-			continue;
-		}
+	for (i = 0; i < num; i++) out->elem[i] = *tmp[i]; /* copy merged results back */
 
-		new->elem[k] = *tmp[j];
-		j++;
-		k++;
-	}
-	new->len = i;
+#if !defined(NDEBUG) && defined(WITH_VERIFY_PTR)
+	for (i = 0; i < num - 1; i++) fr_assert(terminal_cmp(&out->elem[i], &out->elem[i + 1]) < 0);
+#endif
 
-	return new;
+	return out;
 }
 
 /** Copy as many bytes as possible from a sbuff to a sbuff
@@ -1140,11 +1140,14 @@ fr_slen_t fr_sbuff_out_##_name(fr_sbuff_parse_error_t *err, _type *out, fr_sbuff
 		if (err) *err = FR_SBUFF_PARSE_ERROR_NOT_FOUND; \
 		return -1; \
 	} \
+	/* coverity[result_independent_of_operands] */ \
 	if ((num > (_max)) || ((errno == EINVAL) && (num == 0)) || ((errno == ERANGE) && (num == LLONG_MAX))) { \
 		if (err) *err = FR_SBUFF_PARSE_ERROR_NUM_OVERFLOW; \
 		*out = (_type)(_max); \
 		return -1; \
-	} else if ((num < (_min)) || ((errno == ERANGE) && (num == LLONG_MIN))) { \
+	} else \
+	/* coverity[result_independent_of_operands] */ \
+	if ((num < (_min)) || ((errno == ERANGE) && (num == LLONG_MIN))) { \
 		if (err) *err = FR_SBUFF_PARSE_ERROR_NUM_UNDERFLOW; \
 		*out = (_type)(_min); \
 		return -1; \
@@ -1203,6 +1206,7 @@ fr_slen_t fr_sbuff_out_##_name(fr_sbuff_parse_error_t *err, _type *out, fr_sbuff
 		if (err) *err = FR_SBUFF_PARSE_ERROR_NOT_FOUND; \
 		return -1; \
 	} \
+	/* coverity[result_independent_of_operands] */ \
 	if ((num > (_max)) || ((errno == EINVAL) && (num == 0)) || ((errno == ERANGE) && (num == ULLONG_MAX))) { \
 		if (err) *err = FR_SBUFF_PARSE_ERROR_NUM_OVERFLOW; \
 		*out = (_type)(_max); \
@@ -1275,6 +1279,7 @@ fr_slen_t fr_sbuff_out_##_name(fr_sbuff_parse_error_t *err, _type *out, fr_sbuff
 		return -1; \
 	} \
 	errno = 0; /* this is needed as parsing functions don't reset errno */ \
+	/* coverity[uninit] */ \
 	res = _func(buff, &end); \
 	if (errno == ERANGE) { \
 		if (res > 0) { \

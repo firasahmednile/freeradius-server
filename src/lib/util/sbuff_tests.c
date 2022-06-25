@@ -736,8 +736,8 @@ static void test_terminal_merge(void)
 	fr_sbuff_term_t a = FR_SBUFF_TERMS(
 				L(""),
 				L("\t"),
-				L("\r"),
 				L("\n"),
+				L("\r"),
 				L(" "),
 				L("!"),
 				L("%"),
@@ -755,8 +755,8 @@ static void test_terminal_merge(void)
 				L("~")
 			    );
 	fr_sbuff_term_t b = FR_SBUFF_TERMS(
+				L(""),
 				L(")"),
-				L("")
 			    );
 
 	fr_sbuff_term_t expect =
@@ -1007,23 +1007,40 @@ static void test_talloc_extend_with_marker(void)
 static void test_file_extend(void)
 {
 	fr_sbuff_t	sbuff;
+	fr_sbuff_t	our_sbuff;
 	fr_sbuff_uctx_file_t	fctx;
 	FILE		*fp;
 	char		buff[16];
+	char		out[16 + 1];
 	char		fbuff[] = "                        xyzzy";
 	char		*post_ws;
+	ssize_t		slen;
 
 	TEST_CASE("Initialization");
 	fp = fmemopen(fbuff, sizeof(fbuff) - 1, "r");
 	TEST_CHECK(fp != NULL);
 	TEST_CHECK(fr_sbuff_init_file(&sbuff, &fctx, buff, sizeof(buff), fp, 128) == &sbuff);
+	our_sbuff = FR_SBUFF_BIND_CURRENT(&sbuff);
 
 	TEST_CASE("Advance past whitespace, which will require shift/extend");
-	TEST_CHECK_LEN(sizeof(fbuff) - 6, fr_sbuff_adv_past_whitespace(&sbuff, SIZE_MAX, NULL));
+	TEST_CHECK_LEN(fr_sbuff_adv_past_whitespace(&our_sbuff, SIZE_MAX, NULL), sizeof(fbuff) - 6);
 	TEST_CASE("Verify that we passed all and only whitespace");
-	(void) fr_sbuff_out_abstrncpy(NULL, &post_ws, &sbuff, 24);
+	(void) fr_sbuff_out_abstrncpy(NULL, &post_ws, &our_sbuff, 24);
 	TEST_CHECK_STRCMP(post_ws, "xyzzy");
 	talloc_free(post_ws);
+	TEST_CASE("Verify parent buffer end");
+	TEST_CHECK(sbuff.end == our_sbuff.end);
+
+	TEST_CASE("Verify that we do not read shifted buffer past eof");
+	slen = fr_sbuff_out_bstrncpy(&FR_SBUFF_OUT(out, sizeof(out)), &our_sbuff, SIZE_MAX);
+	TEST_CHECK_SLEN(slen, 0);
+	slen = fr_sbuff_out_bstrncpy_exact(&FR_SBUFF_OUT(out, sizeof(out)), &our_sbuff, SIZE_MAX);
+	TEST_CHECK_SLEN(slen, 0);
+	slen = fr_sbuff_out_bstrncpy_until(&FR_SBUFF_OUT(out, sizeof(out)), &our_sbuff, SIZE_MAX, NULL, NULL);
+	TEST_CHECK_SLEN(slen, 0);
+	slen = fr_sbuff_out_bstrncpy_allowed(&FR_SBUFF_OUT(out, sizeof(out)), &our_sbuff, SIZE_MAX, allow_lowercase_and_space);
+	TEST_CHECK_SLEN(slen, 0);
+
 	fclose(fp);
 }
 
@@ -1042,8 +1059,8 @@ static void test_file_extend_max(void)
 	TEST_CHECK(fr_sbuff_init_file(&sbuff, &fctx, buff, sizeof(buff), fp, sizeof(fbuff) - 8) == &sbuff);
 
 	TEST_CASE("Confirm that max stops us from seeing xyzzy");
-	TEST_CHECK_LEN(sizeof(fbuff) - 8, fr_sbuff_adv_past_whitespace(&sbuff, SIZE_MAX, NULL));
-	(void) fr_sbuff_out_abstrncpy(NULL, &post_ws, &sbuff, 24);
+	TEST_CHECK_SLEN(fr_sbuff_adv_past_whitespace(&sbuff, SIZE_MAX, NULL), sizeof(fbuff) - 8);
+	TEST_CHECK_SLEN(fr_sbuff_out_abstrncpy(NULL, &post_ws, &sbuff, 24), 0);
 	TEST_CHECK_STRCMP(post_ws, "");
 	talloc_free(post_ws);
 	fclose(fp);

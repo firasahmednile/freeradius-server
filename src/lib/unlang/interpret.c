@@ -1242,20 +1242,14 @@ TALLOC_CTX *unlang_interpret_frame_talloc_ctx(request_t *request)
 	unlang_stack_t			*stack = request->stack;
 	unlang_stack_frame_t		*frame = &stack->frame[stack->depth];
 
-	switch (frame->instruction->type) {
-	default:
-		break;
-
-	case UNLANG_TYPE_MODULE:
-	case UNLANG_TYPE_XLAT:
-		return (TALLOC_CTX *) frame->state;
-	}
+	if (frame->state) return (TALLOC_CTX *)frame->state;
 
 	/*
-	 *	Ensure that the memory is always cleaned up when the
-	 *	request exits.  And make sure that this function is safe to call from anywhere.
+	 *	If the frame doesn't ordinarily have a
+	 *	state, assume the caller knows what it's
+	 *	doing and allocate one.
 	 */
-	return (TALLOC_CTX *)request;
+	return (TALLOC_CTX *)(frame->state = talloc_new(request));
 }
 
 static xlat_arg_parser_t const unlang_interpret_xlat_args[] = {
